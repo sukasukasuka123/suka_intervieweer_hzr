@@ -7,8 +7,9 @@
   3. 知识库检索（RAG）
   4. 题库抽题工具（按分类/难度随机抽题）
   5. 题库内容查询（精确搜索）
-  6. DuckDuckGo 网络搜索
-  7. Wikipedia 技术概念查询
+  6. 题库分类统计
+  7. Tavily 网络搜索
+  8. Wikipedia 技术概念查询
 """
 import json
 import os
@@ -16,12 +17,21 @@ import random
 from typing import List, Optional
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+load_dotenv()  # 加载 .env 文件到 os.environ
 
+# ── Tavily 搜索（使用新包 langchain-tavily）────────────────────────────────────
 try:
-    from langchain_community.tools import DuckDuckGoSearchRun
+    from langchain_tavily import TavilySearch
 except ImportError:
-    from langchain_community.tools.ddg_search.tool import DuckDuckGoSearchRun
+    # 兼容旧版本
+    try:
+        from langchain_community.tools.tavily_search import TavilySearchResults as TavilySearch
+    except ImportError:
+        TavilySearch = None
 
+# ── Wikipedia 查询 ────────────────────────────────────────────────────────────
 try:
     from langchain_community.tools import WikipediaQueryRun
     from langchain_community.utilities import WikipediaAPIWrapper
@@ -29,11 +39,14 @@ except ImportError:
     from langchain_community.tools.wikipedia.tool import WikipediaQueryRun
     from langchain_community.utilities.wikipedia import WikipediaAPIWrapper
 
+# ── Model 1：查询学生面试历史输入 ──────────────────────────────────────────────
 
-# ── Tool 1：查询学生面试历史 ──────────────────────────────────────────────────
+class StudentHistoryInput(BaseModel):
+    """查询学生历史面试记录工具的输入参数"""
+    student_id: int = Field(..., description="学生的唯一 ID，用于查询其面试历史")
 
 def create_history_tool(db):
-    @tool
+    @tool(args_schema=StudentHistoryInput)
     def get_student_interview_history(student_id: int) -> str:
         """查询指定学生的历史面试记录，包含各次面试的岗位、得分和时间。"""
         rows = db.fetchall(
@@ -59,10 +72,14 @@ def create_history_tool(db):
     return get_student_interview_history
 
 
-# ── Tool 2：查询岗位信息 ──────────────────────────────────────────────────────
+# ── Model 2：查询岗位信息输入 ──────────────────────────────────────────────────
+
+class JobInfoInput(BaseModel):
+    """查询岗位信息工具的输入参数"""
+    job_position_id: Optional[int] = Field(default=None, description="岗位 ID。不传则列出所有岗位；传入则返回该岗位详细技术栈")
 
 def create_job_info_tool(db):
-    @tool
+    @tool(args_schema=JobInfoInput)
     def get_job_position_info(job_position_id: Optional[int] = None) -> str:
         """查询岗位信息。不传 ID 则列出所有岗位；传入 ID 则返回该岗位的详细技术栈。"""
         if job_position_id is None:
@@ -87,14 +104,18 @@ def create_job_info_tool(db):
     return get_job_position_info
 
 
-# ── Tool 3：知识库 RAG 检索 ───────────────────────────────────────────────────
+# ── Model 3：知识库 RAG 检索输入 ───────────────────────────────────────────────
+
+class KnowledgeSearchInput(BaseModel):
+    """知识库检索工具的输入参数"""
+    query: str = Field(..., description="检索关键词或问题描述")
+    job_position_id: int = Field(default=0, description="岗位 ID 过滤。0=通用知识库；1=Java 后端；2=前端等")
 
 def create_rag_tool(knowledge_store):
-    @tool
+    @tool(args_schema=KnowledgeSearchInput)
     def search_knowledge_base(query: str, job_position_id: int = 0) -> str:
         """
         从本地知识库检索与问题相关的技术知识。
-        job_position_id=0 表示通用知识库；1=Java后端；2=前端。
         适合查询面试题答案、技术概念、最佳实践。
         """
         results = knowledge_store.retrieve(query, job_position_id=job_position_id, top_k=3)
@@ -108,10 +129,16 @@ def create_rag_tool(knowledge_store):
     return search_knowledge_base
 
 
-# ── Tool 4：题库抽题 ──────────────────────────────────────────────────────────
+# ── Model 4：题库抽题输入 ──────────────────────────────────────────────────────
+
+class QuizDrawInput(BaseModel):
+    """题库抽题工具的输入参数"""
+    classify: str = Field(default="", description="题目分类，如 'Java 基础'、'MySQL' 等。留空则不限分类")
+    level: str = Field(default="", description="难度，'初级'/'中级'/'高级'。留空则不限难度")
+    count: int = Field(default=5, description="抽题数量，默认 5 题，最多 20 题", ge=1, le=20)
 
 def create_quiz_draw_tool(db):
-    @tool
+    @tool(args_schema=QuizDrawInput)
     def draw_questions_from_bank(
         classify: str = "",
         level: str = "",
@@ -119,9 +146,7 @@ def create_quiz_draw_tool(db):
     ) -> str:
         """
         从题库按分类和难度随机抽题。
-        classify：题目分类，如 'Java基础'、'MySQL'、'Redis'、'JavaScript'、'Vue/React'、'Spring'、'JVM'、'计算机网络'、'数据结构与算法'。留空则不限分类。
-        level：难度，'初级'/'中级'/'高级'，留空则不限难度。
-        count：抽题数量，默认5题，最多20题。
+        适合用于生成模拟面试试卷或日常练习。
         """
         count = min(count, 20)
         sql = "SELECT id, classify, level, content FROM question_bank WHERE 1=1"
@@ -146,15 +171,19 @@ def create_quiz_draw_tool(db):
     return draw_questions_from_bank
 
 
-# ── Tool 5：题库内容精确查询 ──────────────────────────────────────────────────
+# ── Model 5：题库内容精确查询输入 ──────────────────────────────────────────────
+
+class QuizSearchInput(BaseModel):
+    """题库内容搜索工具的输入参数"""
+    keyword: str = Field(..., description="搜索关键词，将在题目内容和答案中模糊匹配")
+    show_answer: bool = Field(default=True, description="是否显示参考答案，默认显示")
 
 def create_quiz_search_tool(db):
-    @tool
+    @tool(args_schema=QuizSearchInput)
     def search_question_bank(keyword: str, show_answer: bool = True) -> str:
         """
         在题库中关键词搜索题目。
-        keyword：搜索关键词（在题目内容中模糊匹配）。
-        show_answer：是否显示参考答案，默认显示。
+        适合查找特定知识点的题目及参考解析。
         """
         rows = db.fetchall(
             "SELECT id, classify, level, content, answer FROM question_bank "
@@ -175,13 +204,18 @@ def create_quiz_search_tool(db):
     return search_question_bank
 
 
-# ── Tool 6：题库分类统计 ──────────────────────────────────────────────────────
+# ── Model 6：题库分类统计输入 ──────────────────────────────────────────────────
+
+class QuizStatsInput(BaseModel):
+    """题库统计工具的输入参数（无需参数）"""
+    pass
 
 def create_quiz_stats_tool(db):
-    @tool
+    @tool(args_schema=QuizStatsInput)
     def get_question_bank_stats() -> str:
         """
         查看题库的整体统计：各分类、各难度的题目数量分布。
+        适合用于了解题库覆盖范围。
         """
         rows = db.fetchall(
             "SELECT classify, level, COUNT(*) as cnt FROM question_bank GROUP BY classify, level ORDER BY classify, level"
@@ -207,33 +241,83 @@ def create_quiz_stats_tool(db):
     return get_question_bank_stats
 
 
-# ── Tool 7：DuckDuckGo 网络搜索 ───────────────────────────────────────────────
+# ── Model 7：网络搜索输入 ──────────────────────────────────────────────────────
+
+class WebSearchInput(BaseModel):
+    """网络搜索工具的输入参数"""
+    query: str = Field(..., description="搜索查询词，用于查找最新技术资料、新闻或框架更新")
 
 def create_web_search_tool():
-    _search = DuckDuckGoSearchRun()
+    """
+    创建 Tavily 搜索工具。
+    需要环境变量 TAVILY_API_KEY 已设置。
+    """
+    if TavilySearch is None:
+        raise ImportError("请安装 langchain-tavily: pip install -U langchain-tavily")
 
-    @tool
+    # ── 注入 API KEY ──────────────────────────────────────────────────────
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        # 如果没找到环境变量，抛出明确错误，防止运行时报错难排查
+        raise ValueError("未找到 TAVILY_API_KEY 环境变量，请在 .env 文件中配置")
+
+    # 新包使用 TavilySearch 类，通过 api_key 参数注入
+    tavily_tool = TavilySearch(
+        api_key=api_key,  # 🔑 关键：在这里注入 API KEY
+        max_results=6,
+        search_depth="advanced",
+        include_answer=True,
+        include_raw_content=False,
+        include_images=False,
+    )
+
+    @tool(args_schema=WebSearchInput)
     def web_search(query: str) -> str:
         """
-        通过 DuckDuckGo 搜索最新技术资料、新闻、框架更新等。
-        适合查询本地知识库没有的最新信息（如某框架最新版本特性、行业趋势）。
+        通过 Tavily 搜索最新技术资料、新闻、框架更新、API 变更等。
+        适合查询本地知识库没有的实时/最新信息。
         """
         try:
-            return _search.run(query)
+            # 新包直接调用 run 或 invoke
+            results = tavily_tool.invoke({"query": query})
+
+            if not results:
+                return "Tavily 搜索未返回任何结果。"
+
+            lines = [f"🔍 Tavily 搜索结果（查询：{query}）：\n"]
+            for i, res in enumerate(results, 1):
+                title = res.get("title", "无标题")
+                url = res.get("url", "无链接")
+                content = res.get("content", "").strip()[:400]
+                answer = res.get("answer", "")
+
+                lines.append(f"[{i}] {title}")
+                lines.append(f"   链接：{url}")
+                if answer:
+                    lines.append(f"   总结：{answer}")
+                if content:
+                    lines.append(f"   内容片段：{content}...")
+                lines.append("")
+
+            return "\n".join(lines)
+
         except Exception as e:
-            return f"搜索失败：{e}"
+            return f"Tavily 搜索失败：{str(e)}（请检查 TAVILY_API_KEY 是否正确）"
 
     return web_search
 
+# ── Model 8：Wikipedia 技术概念查询输入 ────────────────────────────────────────
 
-# ── Tool 8：Wikipedia 技术概念查询 ────────────────────────────────────────────
+class WikiSearchInput(BaseModel):
+    """Wikipedia 查询工具的输入参数"""
+    query: str = Field(..., description="技术概念名称，用于查询权威定义和背景知识")
 
 def create_wiki_tool():
     _wiki = WikipediaQueryRun(
         api_wrapper=WikipediaAPIWrapper(lang="zh", top_k_results=2, doc_content_chars_max=800)
     )
 
-    @tool
+    @tool(args_schema=WikiSearchInput)
     def search_wikipedia(query: str) -> str:
         """
         从 Wikipedia 查询技术概念的权威定义和背景知识。
