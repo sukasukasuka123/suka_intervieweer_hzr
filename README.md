@@ -5,6 +5,39 @@
 
 ---
 
+# 注意
+
+一、如果只是“刚提交，还没 push”
+
+最简单：
+
+git reset --soft HEAD~1
+
+含义：
+
+撤回最近一次 commit
+
+代码还在本地
+
+你可以删掉 API key 再重新 commit
+
+然后重新提交：
+
+git add .
+git commit -m "remove api key"
+二、如果 已经 push 到 GitHub
+方法 1（简单粗暴，适合最近一次提交）
+git reset --soft HEAD~1
+git push --force
+
+解释：
+
+回退本地提交
+
+强制覆盖远程历史
+
+---
+
 ## 目录
 
 - [项目总览](#1-项目总览)
